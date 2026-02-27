@@ -17,47 +17,74 @@ export function useWebRTC(roomId: string, role: 'teacher' | 'student') {
         ],
     };
 
-    const startCamera = async () => {
-        try {
-            const stream = await navigator.mediaDevices.getUserMedia({
-                video: true,
-                audio: true
-            });
-            setLocalStream(stream);
-            stream.getTracks().forEach(track => {
-                if (pcRef.current) pcRef.current.addTrack(track, stream);
-            });
-            return stream;
-        } catch (err) {
-            console.error('Error accessing camera:', err);
-            return null;
-        }
-    };
-
     useEffect(() => {
+        const supabase = createClient();
         const pc = new RTCPeerConnection(configuration);
         pcRef.current = pc;
+        let negotiating = false;
 
-        // Auto-start camera
-        startCamera();
-
-        pc.oniceconnectionstatechange = () => {
-            setStatus(pc.iceConnectionState as any);
-        };
+        // Remote stream setup
+        const remote = new MediaStream();
+        setRemoteStream(null);
 
         pc.ontrack = (event) => {
-            if (event.streams && event.streams[0]) {
-                setRemoteStream(event.streams[0]);
+            event.streams[0].getTracks().forEach(track => {
+                remote.addTrack(track);
+            });
+            setRemoteStream(remote);
+        };
+
+        pc.oniceconnectionstatechange = () => {
+            const state = pc.iceConnectionState;
+            if (state === 'connected' || state === 'completed') {
+                setStatus('connected');
+            } else if (state === 'disconnected' || state === 'failed' || state === 'closed') {
+                setStatus('disconnected');
+            } else {
+                setStatus('connecting');
             }
         };
 
-        const supabase = createClient();
+        // Get camera
+        const startCamera = async () => {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+                setLocalStream(stream);
+                localStreamRef.current = stream;
+                stream.getTracks().forEach(track => pc.addTrack(track, stream));
+                return stream;
+            } catch (err) {
+                console.error('Error accessing camera:', err);
+                return null;
+            }
+        };
+
+        // Create and send offer (teacher only)
+        const createAndSendOffer = async (channel: ReturnType<typeof supabase.channel>) => {
+            if (negotiating || role !== 'teacher') return;
+            negotiating = true;
+
+            try {
+                const offer = await pc.createOffer();
+                await pc.setLocalDescription(offer);
+                channel.send({
+                    type: 'broadcast',
+                    event: 'signal',
+                    payload: { type: 'offer', content: offer },
+                });
+                console.log('[Teacher] Offer sent');
+            } catch (e) {
+                console.error('Error creating offer:', e);
+            } finally {
+                negotiating = false;
+            }
+        };
+
         const channel = supabase.channel(`room-${roomId}`, {
-            config: {
-                broadcast: { self: false },
-            },
+            config: { broadcast: { self: false } },
         });
 
+        // ICE candidates
         pc.onicecandidate = (event) => {
             if (event.candidate) {
                 channel.send({
@@ -68,48 +95,97 @@ export function useWebRTC(roomId: string, role: 'teacher' | 'student') {
             }
         };
 
-        channel.on('broadcast', { event: 'signal' }, async ({ payload }: { payload: { type: string, content: any } }) => {
+        // Signal handler
+        channel.on('broadcast', { event: 'signal' }, async ({ payload }: { payload: { type: string; content: unknown } }) => {
             const { type, content } = payload;
 
-            if (type === 'offer' && role === 'student' && !pc.remoteDescription) {
-                await pc.setRemoteDescription(new RTCSessionDescription(content));
-                const answer = await pc.createAnswer();
-                await pc.setLocalDescription(answer);
-                channel.send({
-                    type: 'broadcast',
-                    event: 'signal',
-                    payload: { type: 'answer', content: answer },
-                });
-            } else if (type === 'answer' && role === 'teacher' && !pc.remoteDescription) {
-                await pc.setRemoteDescription(new RTCSessionDescription(content));
-            } else if (type === 'candidate') {
-                try {
-                    await pc.addIceCandidate(new RTCIceCandidate(content));
-                } catch (e) {
-                    console.warn('Error adding ICE candidate', e);
+            try {
+                if (type === 'offer' && role === 'student') {
+                    // Student receives offer → set remote description and create answer
+                    console.log('[Student] Received offer');
+                    // Reset if we had a previous description (re-negotiation)
+                    if (pc.signalingState !== 'stable') {
+                        await Promise.all([
+                            pc.setLocalDescription({ type: 'rollback' }),
+                        ]);
+                    }
+                    await pc.setRemoteDescription(new RTCSessionDescription(content as RTCSessionDescriptionInit));
+                    const answer = await pc.createAnswer();
+                    await pc.setLocalDescription(answer);
+                    channel.send({
+                        type: 'broadcast',
+                        event: 'signal',
+                        payload: { type: 'answer', content: answer },
+                    });
+                    console.log('[Student] Answer sent');
+
+                } else if (type === 'answer' && role === 'teacher') {
+                    // Teacher receives answer
+                    console.log('[Teacher] Received answer');
+                    if (pc.signalingState === 'have-local-offer') {
+                        await pc.setRemoteDescription(new RTCSessionDescription(content as RTCSessionDescriptionInit));
+                    }
+
+                } else if (type === 'candidate') {
+                    if (pc.remoteDescription) {
+                        await pc.addIceCandidate(new RTCIceCandidate(content as RTCIceCandidateInit));
+                    }
+
+                } else if (type === 'student-ready' && role === 'teacher') {
+                    // Student just joined → teacher re-sends offer
+                    console.log('[Teacher] Student joined, sending new offer');
+                    // Create a fresh peer connection state for re-negotiation
+                    negotiating = false;
+                    if (pc.signalingState !== 'stable') {
+                        // If we're in an unstable state, rollback first
+                        try {
+                            await pc.setLocalDescription({ type: 'rollback' });
+                        } catch {
+                            // Rollback might fail if stable, that's fine
+                        }
+                    }
+                    await createAndSendOffer(channel);
                 }
+            } catch (e) {
+                console.warn('Signal handling error:', e);
             }
         });
 
-        channel.subscribe(async (status: string) => {
-            if (status === 'SUBSCRIBED' && role === 'teacher') {
-                const offer = await pc.createOffer();
-                await pc.setLocalDescription(offer);
-                channel.send({
-                    type: 'broadcast',
-                    event: 'signal',
-                    payload: { type: 'offer', content: offer },
-                });
+        // Subscribe and init
+        channel.subscribe(async (channelStatus: string) => {
+            if (channelStatus === 'SUBSCRIBED') {
+                console.log(`[${role}] Channel subscribed`);
+
+                await startCamera();
+
+                if (role === 'teacher') {
+                    // Teacher sends offer immediately
+                    // Small delay to let camera tracks be added to the PC
+                    setTimeout(() => createAndSendOffer(channel), 500);
+                } else {
+                    // Student tells teacher they're ready
+                    // Small delay so teacher's listener is ready
+                    setTimeout(() => {
+                        channel.send({
+                            type: 'broadcast',
+                            event: 'signal',
+                            payload: { type: 'student-ready', content: {} },
+                        });
+                        console.log('[Student] Sent ready signal');
+                    }, 1000);
+                }
             }
         });
 
         return () => {
             pc.close();
+            pcRef.current = null;
             channel.unsubscribe();
             if (localStreamRef.current) {
                 localStreamRef.current.getTracks().forEach(track => track.stop());
             }
         };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [roomId, role]);
 
     const startScreenShare = async () => {
@@ -150,27 +226,22 @@ export function useWebRTC(roomId: string, role: 'teacher' | 'student') {
 
         // 2. Mezclar los audios (Local y Remoto) usando AudioContext
         try {
-            // Creamos un contexto de audio (requiere interacción previa del usuario, que ya tenemos al hacer click en el botón)
             const audioContext = new window.AudioContext();
             const destination = audioContext.createMediaStreamDestination();
 
-            // Añadir audio local (micrófono del profesor)
             if (localStream && localStream.getAudioTracks().length > 0) {
                 const localSource = audioContext.createMediaStreamSource(localStream);
                 localSource.connect(destination);
             }
 
-            // Añadir audio remoto (micrófono del alumno o audio del sistema)
             if (remoteStream && remoteStream.getAudioTracks().length > 0) {
                 const remoteSource = audioContext.createMediaStreamSource(remoteStream);
                 remoteSource.connect(destination);
             }
 
-            // Añadir el track de audio mezclado al stream final
             destination.stream.getAudioTracks().forEach(track => mixedStream.addTrack(track));
         } catch (e) {
             console.warn('No se pudo mezclar el audio avanzado, usando fallback', e);
-            // Fallback: solo coger los audios disponibles en el stream principal
             streamToRecord.getAudioTracks().forEach(track => mixedStream.addTrack(track));
         }
 
