@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import { createClient } from '@/lib/supabase/client';
 
 export function useWebRTC(roomId: string, role: 'teacher' | 'student') {
@@ -14,19 +14,12 @@ export function useWebRTC(roomId: string, role: 'teacher' | 'student') {
         iceServers: [
             { urls: 'stun:stun.l.google.com:19302' },
             { urls: 'stun:stun1.l.google.com:19302' },
-            // TURN servers (relay) - necesarios para redes con NAT simétrico (colegios, empresas)
             {
-                urls: 'turn:openrelay.metered.ca:80',
-                username: 'openrelayproject',
-                credential: 'openrelayproject',
-            },
-            {
-                urls: 'turn:openrelay.metered.ca:443',
-                username: 'openrelayproject',
-                credential: 'openrelayproject',
-            },
-            {
-                urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+                urls: [
+                    'turn:openrelay.metered.ca:80',
+                    'turn:openrelay.metered.ca:443',
+                    'turn:openrelay.metered.ca:443?transport=tcp',
+                ],
                 username: 'openrelayproject',
                 credential: 'openrelayproject',
             },
@@ -38,37 +31,66 @@ export function useWebRTC(roomId: string, role: 'teacher' | 'student') {
         const supabase = createClient();
         const pc = new RTCPeerConnection(configuration);
         pcRef.current = pc;
-        let negotiating = false;
 
-        // Remote stream setup
-        const remote = new MediaStream();
-        setRemoteStream(null);
+        // Queue para ICE candidates que llegan ANTES de setRemoteDescription
+        const pendingCandidates: RTCIceCandidateInit[] = [];
+        let hasRemoteDescription = false;
 
+        const flushCandidates = async () => {
+            while (pendingCandidates.length > 0) {
+                const candidate = pendingCandidates.shift()!;
+                try {
+                    await pc.addIceCandidate(new RTCIceCandidate(candidate));
+                } catch (e) {
+                    console.warn('[ICE] Error adding queued candidate:', e);
+                }
+            }
+        };
+
+        // Remote stream
         pc.ontrack = (event) => {
-            event.streams[0].getTracks().forEach(track => {
-                remote.addTrack(track);
-            });
-            setRemoteStream(remote);
+            console.log(`[${role}] Track received:`, event.track.kind);
+            if (event.streams && event.streams[0]) {
+                setRemoteStream(event.streams[0]);
+            }
         };
 
         pc.oniceconnectionstatechange = () => {
             const state = pc.iceConnectionState;
+            console.log(`[${role}] ICE state:`, state);
             if (state === 'connected' || state === 'completed') {
                 setStatus('connected');
-            } else if (state === 'disconnected' || state === 'failed' || state === 'closed') {
+            } else if (state === 'failed') {
+                // Intentar ICE restart
+                console.log(`[${role}] ICE failed, attempting restart...`);
                 setStatus('disconnected');
+                pc.restartIce();
+            } else if (state === 'disconnected') {
+                setStatus('disconnected');
+                // Dar unos segundos antes de reintentar (a veces se recupera solo)
+                setTimeout(() => {
+                    if (pc.iceConnectionState === 'disconnected') {
+                        console.log(`[${role}] Still disconnected, restarting ICE...`);
+                        pc.restartIce();
+                    }
+                }, 3000);
             } else {
                 setStatus('connecting');
             }
         };
 
-        // Get camera
+        pc.onicegatheringstatechange = () => {
+            console.log(`[${role}] ICE gathering state:`, pc.iceGatheringState);
+        };
+
+        // Camera
         const startCamera = async () => {
             try {
                 const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
                 setLocalStream(stream);
                 localStreamRef.current = stream;
                 stream.getTracks().forEach(track => pc.addTrack(track, stream));
+                console.log(`[${role}] Camera started, tracks added to PC`);
                 return stream;
             } catch (err) {
                 console.error('Error accessing camera:', err);
@@ -76,125 +98,123 @@ export function useWebRTC(roomId: string, role: 'teacher' | 'student') {
             }
         };
 
-        // Create and send offer (teacher only)
-        const createAndSendOffer = async (channel: ReturnType<typeof supabase.channel>) => {
-            if (negotiating || role !== 'teacher') return;
-            negotiating = true;
-
-            try {
-                const offer = await pc.createOffer();
-                await pc.setLocalDescription(offer);
-                channel.send({
-                    type: 'broadcast',
-                    event: 'signal',
-                    payload: { type: 'offer', content: offer },
-                });
-                console.log('[Teacher] Offer sent');
-            } catch (e) {
-                console.error('Error creating offer:', e);
-            } finally {
-                negotiating = false;
-            }
-        };
-
+        // Channel
         const channel = supabase.channel(`room-${roomId}`, {
             config: { broadcast: { self: false } },
         });
 
-        // ICE candidates
         pc.onicecandidate = (event) => {
             if (event.candidate) {
                 channel.send({
                     type: 'broadcast',
                     event: 'signal',
-                    payload: { type: 'candidate', content: event.candidate },
+                    payload: { type: 'candidate', content: event.candidate.toJSON() },
                 });
             }
         };
 
+        // Create offer (teacher)
+        const createOffer = async () => {
+            try {
+                // Reset state if needed
+                if (pc.signalingState !== 'stable') {
+                    console.log(`[Teacher] Resetting signaling state from ${pc.signalingState}`);
+                }
+
+                const offer = await pc.createOffer({ iceRestart: true });
+                await pc.setLocalDescription(offer);
+                channel.send({
+                    type: 'broadcast',
+                    event: 'signal',
+                    payload: { type: 'offer', content: pc.localDescription!.toJSON() },
+                });
+                console.log('[Teacher] Offer sent');
+            } catch (e) {
+                console.error('[Teacher] Error creating offer:', e);
+            }
+        };
+
         // Signal handler
-        channel.on('broadcast', { event: 'signal' }, async ({ payload }: { payload: { type: string; content: unknown } }) => {
+        channel.on('broadcast', { event: 'signal' }, async ({ payload }: { payload: { type: string; content: Record<string, unknown> } }) => {
             const { type, content } = payload;
+            console.log(`[${role}] Received signal: ${type}`);
 
             try {
                 if (type === 'offer' && role === 'student') {
-                    // Student receives offer → set remote description and create answer
-                    console.log('[Student] Received offer');
-                    // Reset if we had a previous description (re-negotiation)
-                    if (pc.signalingState !== 'stable') {
-                        await Promise.all([
-                            pc.setLocalDescription({ type: 'rollback' }),
-                        ]);
-                    }
-                    await pc.setRemoteDescription(new RTCSessionDescription(content as RTCSessionDescriptionInit));
+                    await pc.setRemoteDescription(new RTCSessionDescription(content as unknown as RTCSessionDescriptionInit));
+                    hasRemoteDescription = true;
+                    await flushCandidates();
+
                     const answer = await pc.createAnswer();
                     await pc.setLocalDescription(answer);
                     channel.send({
                         type: 'broadcast',
                         event: 'signal',
-                        payload: { type: 'answer', content: answer },
+                        payload: { type: 'answer', content: pc.localDescription!.toJSON() },
                     });
                     console.log('[Student] Answer sent');
 
                 } else if (type === 'answer' && role === 'teacher') {
-                    // Teacher receives answer
-                    console.log('[Teacher] Received answer');
                     if (pc.signalingState === 'have-local-offer') {
-                        await pc.setRemoteDescription(new RTCSessionDescription(content as RTCSessionDescriptionInit));
+                        await pc.setRemoteDescription(new RTCSessionDescription(content as unknown as RTCSessionDescriptionInit));
+                        hasRemoteDescription = true;
+                        await flushCandidates();
+                        console.log('[Teacher] Remote description set');
                     }
 
                 } else if (type === 'candidate') {
-                    if (pc.remoteDescription) {
-                        await pc.addIceCandidate(new RTCIceCandidate(content as RTCIceCandidateInit));
+                    const candidateInit = content as unknown as RTCIceCandidateInit;
+                    if (hasRemoteDescription && pc.remoteDescription) {
+                        try {
+                            await pc.addIceCandidate(new RTCIceCandidate(candidateInit));
+                        } catch (e) {
+                            console.warn('[ICE] Error adding candidate:', e);
+                        }
+                    } else {
+                        // Encolar hasta que tengamos remote description
+                        console.log(`[${role}] Queuing ICE candidate (no remote desc yet)`);
+                        pendingCandidates.push(candidateInit);
                     }
 
                 } else if (type === 'student-ready' && role === 'teacher') {
-                    // Student just joined → teacher re-sends offer
-                    console.log('[Teacher] Student joined, sending new offer');
-                    // Create a fresh peer connection state for re-negotiation
-                    negotiating = false;
-                    if (pc.signalingState !== 'stable') {
-                        // If we're in an unstable state, rollback first
-                        try {
-                            await pc.setLocalDescription({ type: 'rollback' });
-                        } catch {
-                            // Rollback might fail if stable, that's fine
-                        }
-                    }
-                    await createAndSendOffer(channel);
+                    console.log('[Teacher] Student is ready, sending offer...');
+                    // Reset para nuevo intento
+                    hasRemoteDescription = false;
+                    pendingCandidates.length = 0;
+                    await createOffer();
                 }
             } catch (e) {
-                console.warn('Signal handling error:', e);
+                console.error(`[${role}] Signal error:`, e);
             }
         });
 
-        // Subscribe and init
+        // Subscribe
         channel.subscribe(async (channelStatus: string) => {
             if (channelStatus === 'SUBSCRIBED') {
-                console.log(`[${role}] Channel subscribed`);
+                console.log(`[${role}] Channel SUBSCRIBED`);
+                setStatus('connecting');
 
                 await startCamera();
 
                 if (role === 'teacher') {
-                    // Teacher sends offer immediately
-                    // Small delay to let camera tracks be added to the PC
-                    setTimeout(() => createAndSendOffer(channel), 500);
+                    // Teacher sends initial offer after camera is ready
+                    setTimeout(() => createOffer(), 800);
                 } else {
                     // Student tells teacher they're ready
-                    // Small delay so teacher's listener is ready
                     setTimeout(() => {
                         channel.send({
                             type: 'broadcast',
                             event: 'signal',
                             payload: { type: 'student-ready', content: {} },
                         });
-                        console.log('[Student] Sent ready signal');
-                    }, 1000);
+                        console.log('[Student] Ready signal sent');
+                    }, 1500);
                 }
             }
         });
 
         return () => {
+            console.log(`[${role}] Cleaning up WebRTC`);
             pc.close();
             pcRef.current = null;
             channel.unsubscribe();
@@ -205,7 +225,7 @@ export function useWebRTC(roomId: string, role: 'teacher' | 'student') {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [roomId, role]);
 
-    const startScreenShare = async () => {
+    const startScreenShare = useCallback(async () => {
         try {
             const stream = await navigator.mediaDevices.getDisplayMedia({
                 video: true,
@@ -222,12 +242,12 @@ export function useWebRTC(roomId: string, role: 'teacher' | 'student') {
             console.error('Error sharing screen:', err);
             return null;
         }
-    };
+    }, []);
 
     const recorderRef = useRef<MediaRecorder | null>(null);
     const chunksRef = useRef<Blob[]>([]);
 
-    const toggleRecording = () => {
+    const toggleRecording = useCallback(() => {
         if (recorderRef.current && recorderRef.current.state === 'recording') {
             recorderRef.current.stop();
             return false;
@@ -237,11 +257,8 @@ export function useWebRTC(roomId: string, role: 'teacher' | 'student') {
         if (!streamToRecord) return false;
 
         const mixedStream = new MediaStream();
-
-        // 1. Añadir el track de video principal
         streamToRecord.getVideoTracks().forEach(track => mixedStream.addTrack(track));
 
-        // 2. Mezclar los audios (Local y Remoto) usando AudioContext
         try {
             const audioContext = new window.AudioContext();
             const destination = audioContext.createMediaStreamDestination();
@@ -262,7 +279,6 @@ export function useWebRTC(roomId: string, role: 'teacher' | 'student') {
             streamToRecord.getAudioTracks().forEach(track => mixedStream.addTrack(track));
         }
 
-        // 3. Iniciar la grabación con el stream mezclado
         const options = { mimeType: 'video/webm;codecs=vp8,opus' };
         const recorder = new MediaRecorder(mixedStream, MediaRecorder.isTypeSupported(options.mimeType) ? options : undefined);
 
@@ -285,7 +301,7 @@ export function useWebRTC(roomId: string, role: 'teacher' | 'student') {
 
         recorder.start();
         return true;
-    };
+    }, [localStream, remoteStream]);
 
     return {
         status,
