@@ -1,11 +1,12 @@
 'use client';
 
-import React from 'react';
+import React, { useState } from 'react';
 import { useParams, useSearchParams } from 'next/navigation';
 import { useWebRTC } from '@/features/profemeet/hooks/useWebRTC';
 import { useRemoteControl } from '@/features/profemeet/hooks/useRemoteControl';
 import { NMCard } from '@/features/profemeet/components/NMCard';
 import { NMButton } from '@/features/profemeet/components/NMButton';
+import { Whiteboard } from '@/features/profemeet/components/Whiteboard';
 
 export default function RoomPage() {
     const params = useParams();
@@ -13,8 +14,23 @@ export default function RoomPage() {
     const roomId = params.id as string;
     const role = searchParams.get('role') as 'teacher' | 'student';
 
-    const { status, localStream, remoteStream, startScreenShare, pc } = useWebRTC(roomId, role);
-    useRemoteControl(pc, role);
+    const [isWhiteboardOpen, setIsWhiteboardOpen] = useState(false);
+    const [isRecording, setIsRecording] = useState(false);
+    const [isRemoteEnabled, setIsRemoteEnabled] = useState(false);
+    const [showSettings, setShowSettings] = useState(false);
+
+    const { status, localStream, remoteStream, startScreenShare, toggleRecording, pc } = useWebRTC(roomId, role);
+    useRemoteControl(pc, role, isRemoteEnabled);
+
+    const handleToggleRecording = () => {
+        const started = toggleRecording();
+        setIsRecording(started);
+    };
+
+    const copyRoomLink = () => {
+        navigator.clipboard.writeText(window.location.href);
+        alert('Enlace de la sala copiado al portapapeles');
+    };
 
     return (
         <div className="min-h-screen bg-[var(--nm-bg)] p-4 flex flex-col space-y-4">
@@ -34,11 +50,21 @@ export default function RoomPage() {
                         }`}>
                         {status === 'idle' ? 'Esperando...' : status}
                     </div>
-                    <NMButton className="h-10 w-10 !p-0" variant="inset">
+                    <NMButton className="h-10 w-10 !p-0" variant={showSettings ? "inset" : "primary"} onClick={() => setShowSettings(!showSettings)}>
                         ⚙️
                     </NMButton>
                 </div>
             </header>
+
+            {showSettings && (
+                <NMCard className="mx-4 p-4 flex flex-wrap gap-4 items-center justify-between border-2 border-[var(--nm-accent)]/20 animate-in fade-in slide-in-from-top-2">
+                    <div className="flex items-center space-x-4">
+                        <NMButton onClick={copyRoomLink} className="text-sm">Copiar Enlace de Clase</NMButton>
+                        <NMButton onClick={() => window.location.href = '/'} variant="inset" className="text-sm border-red-200">Salir de la Clase</NMButton>
+                    </div>
+                    <p className="text-xs opacity-50">Configuraciones rápidas para ProfeMeet</p>
+                </NMCard>
+            )}
 
             <main className="flex-1 grid grid-cols-1 lg:grid-cols-4 gap-4">
                 {/* Vista Principal (Pantalla Compartida) */}
@@ -64,12 +90,23 @@ export default function RoomPage() {
                                 Compartir mi pantalla
                             </NMButton>
                         )}
-                        {role === 'teacher' && (
-                            <NMButton onClick={() => { }}>
-                                Tomar Control
+                        {role === 'teacher' && status === 'connected' && (
+                            <NMButton
+                                variant={isRemoteEnabled ? "inset" : "primary"}
+                                onClick={() => setIsRemoteEnabled(!isRemoteEnabled)}
+                                className={isRemoteEnabled ? "text-[var(--nm-accent)] font-bold" : ""}
+                            >
+                                {isRemoteEnabled ? "🖱️ Control Activo" : "Tomar Control"}
                             </NMButton>
                         )}
                     </div>
+
+                    {isRecording && (
+                        <div className="absolute top-4 left-4 flex items-center space-x-2 px-3 py-1 bg-red-500 text-white rounded-full animate-pulse text-xs font-bold">
+                            <div className="w-2 h-2 bg-white rounded-full"></div>
+                            <span>GRABANDO</span>
+                        </div>
+                    )}
                 </NMCard>
 
                 {/* Sidebar (Cámaras y Chat) */}
@@ -101,15 +138,27 @@ export default function RoomPage() {
                         </div>
                     </NMCard>
 
-                    <NMCard className="h-1/3 flex flex-col">
+                    <NMCard className="flex flex-col">
                         <h3 className="text-sm font-semibold opacity-60 uppercase tracking-wider mb-2">Herramientas</h3>
                         <div className="grid grid-cols-2 gap-2">
-                            <NMButton className="text-xs !p-2">Pizarra</NMButton>
-                            <NMButton className="text-xs !p-2">Grabar</NMButton>
+                            <NMButton
+                                className="text-xs !p-2"
+                                onClick={() => setIsWhiteboardOpen(true)}
+                            >
+                                Pizarra
+                            </NMButton>
+                            <NMButton
+                                className={`text-xs !p-2 ${isRecording ? "text-red-500 nm-inset" : ""}`}
+                                onClick={handleToggleRecording}
+                            >
+                                {isRecording ? "Detener" : "Grabar"}
+                            </NMButton>
                         </div>
                     </NMCard>
                 </div>
             </main>
+
+            {isWhiteboardOpen && <Whiteboard onClose={() => setIsWhiteboardOpen(false)} />}
         </div>
     );
 }

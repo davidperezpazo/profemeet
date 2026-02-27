@@ -131,11 +131,46 @@ export function useWebRTC(roomId: string, role: 'teacher' | 'student') {
         }
     };
 
+    const recorderRef = useRef<MediaRecorder | null>(null);
+    const chunksRef = useRef<Blob[]>([]);
+
+    const toggleRecording = () => {
+        if (recorderRef.current && recorderRef.current.state === 'recording') {
+            recorderRef.current.stop();
+            return false;
+        }
+
+        const streamToRecord = remoteStream || localStream;
+        if (!streamToRecord) return false;
+
+        const recorder = new MediaRecorder(streamToRecord);
+        recorderRef.current = recorder;
+        chunksRef.current = [];
+
+        recorder.ondataavailable = (e) => {
+            if (e.data.size > 0) chunksRef.current.push(e.data);
+        };
+
+        recorder.onstop = () => {
+            const blob = new Blob(chunksRef.current, { type: 'video/webm' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `profemeet-clase-${new Date().toISOString()}.webm`;
+            a.click();
+            recorderRef.current = null;
+        };
+
+        recorder.start();
+        return true;
+    };
+
     return {
         status,
         localStream,
         remoteStream,
         startScreenShare,
+        toggleRecording,
         pc: pcRef.current
     };
 }

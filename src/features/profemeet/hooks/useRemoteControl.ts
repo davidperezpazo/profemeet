@@ -2,14 +2,15 @@
 
 import { useEffect } from 'react';
 
-export function useRemoteControl(pc: RTCPeerConnection | null, role: 'teacher' | 'student') {
+export function useRemoteControl(pc: RTCPeerConnection | null, role: 'teacher' | 'student', isEnabled: boolean) {
     useEffect(() => {
-        if (!pc) return;
+        if (!pc || !isEnabled) return;
 
         let dataChannel: RTCDataChannel;
 
         if (role === 'teacher') {
-            dataChannel = pc.createDataChannel('remote-control');
+            // Check if datachannel already exists or is being created
+            dataChannel = pc.createDataChannel('remote-control', { negotiated: true, id: 1 });
 
             const handleMouseMove = (e: MouseEvent) => {
                 if (dataChannel.readyState === 'open') {
@@ -36,24 +37,20 @@ export function useRemoteControl(pc: RTCPeerConnection | null, role: 'teacher' |
                 window.removeEventListener('click', handleClick);
             };
         } else {
-            pc.ondatachannel = (event) => {
-                const channel = event.channel;
-                if (channel.label === 'remote-control') {
-                    channel.onmessage = async (e) => {
-                        const data = JSON.parse(e.data);
-                        console.log('Remote Command Received:', data);
-                        try {
-                            await fetch('http://localhost:8080/exec', {
-                                method: 'POST',
-                                headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify(data)
-                            });
-                        } catch (err) {
-                            console.warn('Local agent not detected. Run profemeet_agent.py on your machine.');
-                        }
-                    };
+            const channel = pc.createDataChannel('remote-control', { negotiated: true, id: 1 });
+            channel.onmessage = async (e) => {
+                const data = JSON.parse(e.data);
+                console.log('Remote Command Received:', data);
+                try {
+                    await fetch('http://localhost:8080/exec', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(data)
+                    });
+                } catch (err) {
+                    // Silently fail if agent not running
                 }
             };
         }
-    }, [pc, role]);
+    }, [pc, role, isEnabled]);
 }
