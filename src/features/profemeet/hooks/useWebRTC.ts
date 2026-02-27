@@ -216,6 +216,8 @@ export function useWebRTC(roomId: string, role: 'teacher' | 'student') {
         });
 
         // Subscribe
+        let pingInterval: NodeJS.Timeout;
+
         channel.subscribe(async (channelStatus: string) => {
             if (channelStatus === 'SUBSCRIBED') {
                 console.log(`[${role}] Channel SUBSCRIBED`);
@@ -224,24 +226,30 @@ export function useWebRTC(roomId: string, role: 'teacher' | 'student') {
                 await startCamera();
 
                 if (role === 'teacher') {
-                    // Teacher sends initial offer after camera is ready
+                    // Teacher sends initial offer after camera is ready, but also waits for student-ready
                     setTimeout(() => createOffer(), 800);
                 } else {
-                    // Student tells teacher they're ready
-                    setTimeout(() => {
-                        channel.send({
-                            type: 'broadcast',
-                            event: 'signal',
-                            payload: { type: 'student-ready', content: {} },
-                        });
-                        console.log('[Student] Ready signal sent');
-                    }, 1500);
+                    // Student repeatedly tells teacher they're ready until they receive an offer
+                    const sendReadySignal = () => {
+                        if (!hasRemoteDescription && pc.connectionState !== 'connected') {
+                            channel.send({
+                                type: 'broadcast',
+                                event: 'signal',
+                                payload: { type: 'student-ready', content: {} },
+                            });
+                            console.log('[Student] Ready signal (ping) sent');
+                        }
+                    };
+
+                    setTimeout(sendReadySignal, 1500);
+                    pingInterval = setInterval(sendReadySignal, 4000);
                 }
             }
         });
 
         return () => {
             console.log(`[${role}] Cleaning up WebRTC`);
+            if (pingInterval) clearInterval(pingInterval);
             pc.close();
             pcRef.current = null;
             channel.unsubscribe();
