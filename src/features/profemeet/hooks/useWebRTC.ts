@@ -143,7 +143,41 @@ export function useWebRTC(roomId: string, role: 'teacher' | 'student') {
         const streamToRecord = remoteStream || localStream;
         if (!streamToRecord) return false;
 
-        const recorder = new MediaRecorder(streamToRecord);
+        const mixedStream = new MediaStream();
+
+        // 1. Añadir el track de video principal
+        streamToRecord.getVideoTracks().forEach(track => mixedStream.addTrack(track));
+
+        // 2. Mezclar los audios (Local y Remoto) usando AudioContext
+        try {
+            // Creamos un contexto de audio (requiere interacción previa del usuario, que ya tenemos al hacer click en el botón)
+            const audioContext = new window.AudioContext();
+            const destination = audioContext.createMediaStreamDestination();
+
+            // Añadir audio local (micrófono del profesor)
+            if (localStream && localStream.getAudioTracks().length > 0) {
+                const localSource = audioContext.createMediaStreamSource(localStream);
+                localSource.connect(destination);
+            }
+
+            // Añadir audio remoto (micrófono del alumno o audio del sistema)
+            if (remoteStream && remoteStream.getAudioTracks().length > 0) {
+                const remoteSource = audioContext.createMediaStreamSource(remoteStream);
+                remoteSource.connect(destination);
+            }
+
+            // Añadir el track de audio mezclado al stream final
+            destination.stream.getAudioTracks().forEach(track => mixedStream.addTrack(track));
+        } catch (e) {
+            console.warn('No se pudo mezclar el audio avanzado, usando fallback', e);
+            // Fallback: solo coger los audios disponibles en el stream principal
+            streamToRecord.getAudioTracks().forEach(track => mixedStream.addTrack(track));
+        }
+
+        // 3. Iniciar la grabación con el stream mezclado
+        const options = { mimeType: 'video/webm;codecs=vp8,opus' };
+        const recorder = new MediaRecorder(mixedStream, MediaRecorder.isTypeSupported(options.mimeType) ? options : undefined);
+
         recorderRef.current = recorder;
         chunksRef.current = [];
 
