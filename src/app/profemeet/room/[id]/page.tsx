@@ -28,8 +28,9 @@ export default function RoomPage() {
     };
 
     const copyRoomLink = () => {
-        navigator.clipboard.writeText(window.location.href);
-        alert('Enlace de la sala copiado al portapapeles');
+        const studentUrl = `${window.location.origin}/profemeet/room/${roomId}?role=student`;
+        navigator.clipboard.writeText(studentUrl);
+        alert('Enlace para el alumno copiado al portapapeles');
     };
 
     return (

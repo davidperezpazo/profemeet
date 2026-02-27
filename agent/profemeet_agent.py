@@ -1,8 +1,6 @@
-/**
- * ProfeMeet Local Agent (Python)
- * Este script debe ser ejecutado por el ALUMNO para permitir el control remoto.
- * Requisitos: pip install pyautogui flask flask-cors
- */
+# ProfeMeet Local Agent (Python)
+# Este script debe ser ejecutado por el ALUMNO para permitir el control remoto.
+# Requisitos: pip install pyautogui flask flask-cors
 
 import pyautogui
 from flask import Flask, request, jsonify
@@ -31,5 +29,5 @@ def execute_command():
     return jsonify({"status": "ok"})
 
 if __name__ == '__main__':
-    print("🚀 ProfeMeet Agent iniciado en el puerto 8080")
+    print("ProfeMeet Agent iniciado en el puerto 8080")
     app.run(port=8080)
