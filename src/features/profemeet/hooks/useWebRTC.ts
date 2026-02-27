@@ -7,6 +7,7 @@ export function useWebRTC(roomId: string, role: 'teacher' | 'student') {
     const [status, setStatus] = useState<'idle' | 'connecting' | 'connected' | 'disconnected'>('idle');
     const [localStream, setLocalStream] = useState<MediaStream | null>(null);
     const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
+    const [remoteScreenStream, setRemoteScreenStream] = useState<MediaStream | null>(null);
     const pcRef = useRef<RTCPeerConnection | null>(null);
     const localStreamRef = useRef<MediaStream | null>(null);
 
@@ -43,11 +44,30 @@ export function useWebRTC(roomId: string, role: 'teacher' | 'student') {
             }
         };
 
+        const remoteCameraStreamIdRef = { current: '' as string };
+
         // Remote stream
         pc.ontrack = (event) => {
-            console.log(`[${role}] Track received:`, event.track.kind);
+            console.log(`[${role}] Track received:`, event.track.kind, 'Stream count:', event.streams?.length);
             if (event.streams && event.streams[0]) {
-                setRemoteStream(event.streams[0]);
+                const stream = event.streams[0];
+                // El primer stream que recibimos siempre asume que es la cámara
+                if (!remoteCameraStreamIdRef.current) {
+                    remoteCameraStreamIdRef.current = stream.id;
+                    setRemoteStream(stream);
+                } else if (stream.id === remoteCameraStreamIdRef.current) {
+                    // Sigue siendo el stream de la cámara (por ejemplo, acaba de llegar el audio o segundo track)
+                    setRemoteStream(stream);
+                } else {
+                    // Es un stream distinto (pantalla compartida)
+                    setRemoteScreenStream(stream);
+
+                    // Si el track termina (el usuario deja de compartir), lo limpiamos
+                    event.track.onended = () => {
+                        console.log(`[${role}] Remote screen track ended`);
+                        setRemoteScreenStream(null);
+                    };
+                }
             }
         };
 
@@ -314,6 +334,7 @@ export function useWebRTC(roomId: string, role: 'teacher' | 'student') {
         status,
         localStream,
         remoteStream,
+        remoteScreenStream,
         startScreenShare,
         toggleRecording,
         pc: pcRef.current

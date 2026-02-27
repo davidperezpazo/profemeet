@@ -19,7 +19,7 @@ export default function RoomPage() {
     const [isRemoteEnabled, setIsRemoteEnabled] = useState(false);
     const [showSettings, setShowSettings] = useState(false);
 
-    const { status, localStream, remoteStream, startScreenShare, toggleRecording, pc } = useWebRTC(roomId, role);
+    const { status, localStream, remoteStream, remoteScreenStream, startScreenShare, toggleRecording, pc } = useWebRTC(roomId, role);
     useRemoteControl(pc, role, isRemoteEnabled);
 
     const handleToggleRecording = () => {
@@ -68,9 +68,16 @@ export default function RoomPage() {
             )}
 
             <main className="flex-1 grid grid-cols-1 lg:grid-cols-4 gap-4">
-                {/* Vista Principal (Pantalla Compartida) */}
+                {/* Vista Principal (Pantalla Compartida o Cámara si no hay pantalla) */}
                 <NMCard className="lg:col-span-3 h-full flex items-center justify-center relative overflow-hidden min-h-[400px]">
-                    {remoteStream ? (
+                    {remoteScreenStream ? (
+                        <video
+                            autoPlay
+                            playsInline
+                            ref={v => { if (v) v.srcObject = remoteScreenStream; }}
+                            className="w-full h-full object-contain"
+                        />
+                    ) : remoteStream ? (
                         <video
                             autoPlay
                             playsInline
