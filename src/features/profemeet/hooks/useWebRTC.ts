@@ -14,15 +14,11 @@ export function useWebRTC(roomId: string, role: 'teacher' | 'student') {
         iceServers: [
             { urls: 'stun:stun.l.google.com:19302' },
             { urls: 'stun:stun1.l.google.com:19302' },
-            {
-                urls: [
-                    'turn:openrelay.metered.ca:80',
-                    'turn:openrelay.metered.ca:443',
-                    'turn:openrelay.metered.ca:443?transport=tcp',
-                ],
-                username: 'openrelayproject',
-                credential: 'openrelayproject',
-            },
+            { urls: 'stun:stun2.l.google.com:19302' },
+            { urls: 'stun:stun3.l.google.com:19302' },
+            { urls: 'stun:stun4.l.google.com:19302' },
+            { urls: 'stun:stun.services.mozilla.com' },
+            { urls: 'stun:global.stun.twilio.com:3478' },
         ],
         iceCandidatePoolSize: 10,
     };
@@ -61,13 +57,11 @@ export function useWebRTC(roomId: string, role: 'teacher' | 'student') {
             if (state === 'connected' || state === 'completed') {
                 setStatus('connected');
             } else if (state === 'failed') {
-                // Intentar ICE restart
                 console.log(`[${role}] ICE failed, attempting restart...`);
                 setStatus('disconnected');
                 pc.restartIce();
             } else if (state === 'disconnected') {
                 setStatus('disconnected');
-                // Dar unos segundos antes de reintentar (a veces se recupera solo)
                 setTimeout(() => {
                     if (pc.iceConnectionState === 'disconnected') {
                         console.log(`[${role}] Still disconnected, restarting ICE...`);
@@ -76,6 +70,19 @@ export function useWebRTC(roomId: string, role: 'teacher' | 'student') {
                 }, 3000);
             } else {
                 setStatus('connecting');
+            }
+        };
+
+        pc.onconnectionstatechange = () => {
+            const state = pc.connectionState;
+            console.log(`[${role}] Connection state:`, state);
+            if (state === 'failed' || state === 'disconnected') {
+                setStatus('disconnected');
+                // Force a full renegotiation on hard failure
+                if (role === 'teacher') {
+                    console.log('[Teacher] Hard connection failure, re-creating offer');
+                    setTimeout(() => createOffer(), 1000);
+                }
             }
         };
 
